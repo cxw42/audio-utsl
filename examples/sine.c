@@ -15,7 +15,7 @@ int main(void)
     if(!Au_Startup()) return 1;
     if(!(hau=Au_New(AUSF_F32, 44100, NULL))) return 2;   /* create an output */
 
-    Au_HL_Sine(hau, 2);     /* 2-sec. sine wave */
+    Au_HL_Sine(hau, 440.0, 2);      /* 2-sec. A4 sine wave */
 
     if(!Au_Delete(hau)) return 3;
     if(!Au_Shutdown()) return 4;

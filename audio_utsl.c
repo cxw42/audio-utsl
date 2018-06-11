@@ -13,16 +13,39 @@
 
 #include <string.h>
 
+#define _USE_MATH_DEFINES
+    /* Or you don't get M_PI from math.h on my system */
+#include <math.h>
+
+#define UNUSED(x) ((void)(x))
+
 /* Private types ========================================================== */
 
+typedef struct AU_Output *PAU;
+
+typedef struct AU_Userdata {
+    PAU pau;
+    void *data;
+} AU_Userdata, *PAU_Userdata;
+
 typedef struct AU_Output {
+    /** A copy of the AU sample format */
+    AU_SampleFormat format;
+
     /* PortAudio */
+
+    /** The PortAudio stream */
     PaStream *pa_stream;
-    void *pa_callback_userdata;
+
+    /** The callback that does the work.  PACallback_() dispatches to
+     * this function. */
     PaStreamCallback *pa_callback;
 
-    /* libsndfile */
-} AU_Output, *PAU;
+    /* Userdata for the pa_callback */
+    void *pa_callback_userdata;
+
+    /* libsndfile TODO */
+} AU_Output;
 
 /** For convenience - map from the opaque HAU provided by the caller to
  * the visible AU_Output * that we use.
@@ -32,7 +55,9 @@ typedef struct AU_Output {
 
 #define POW \
     if(!AuInitialized_) return FALSE; \
-    POW_FAST
+    POW_FAST \
+    if(!pau) return FALSE;
+
 
 /* Globals ================================================================ */
 BOOL AuInitialized_ = FALSE;
@@ -42,7 +67,7 @@ BOOL AuInitialized_ = FALSE;
 /** Main callback for all PortAudio streams.
  * The callback is a thunk to the actual callback, stored in pau.
  */
-int PACallback_(const void *input, void *output,
+static int PACallback_(const void *input, void *output,
     unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo,
     PaStreamCallbackFlags statusFlags, void *handle )
 {
@@ -51,7 +76,7 @@ int PACallback_(const void *input, void *output,
             statusFlags, pau->pa_callback_userdata);
 }
 
-int PAEmptyCallback_(const void *input, void *output,
+static int PAEmptyCallback_(const void *input, void *output,
     unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo,
     PaStreamCallbackFlags statusFlags, void *handle )
 {
@@ -75,7 +100,7 @@ BOOL Au_Startup()
 
     AuInitialized_ = TRUE;
     return TRUE;
-} //Au_Startup
+} /* Au_Startup */
 
 /** Shutdown AU.  Call this after closing any outputs you have open.
  * @return TRUE on success; FALSE on failure
@@ -91,7 +116,7 @@ BOOL Au_Shutdown()
 
     AuInitialized_ = FALSE;
     return TRUE;
-} //Au_Shutdowh
+} /* Au_Shutdown */
 
 /** Create a new output.
  * @param handle {HAU} The output to shut down
@@ -102,6 +127,8 @@ HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data)
     PAU pau;
     PaError pa_err;
     PaSampleFormat pa_format;
+
+    (void)user_data;    /* not yet used */
 
     if(!AuInitialized_) return FALSE;
     /* Map the format, since we don't directly expose the implementation
@@ -124,8 +151,10 @@ HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data)
         if(!pau) break;
         memset(pau, 0, sizeof(AU_Output));
 
+        pau->format = format;
+
         pau->pa_callback = PAEmptyCallback_;
-        pau->pa_callback_userdata = user_data;
+        pau->pa_callback_userdata = NULL;
 
         pa_err = Pa_OpenDefaultStream(
             &pau->pa_stream,
@@ -165,18 +194,70 @@ HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data)
 BOOL Au_Delete(HAU handle)
 {
     POW
-    if(!pau) return FALSE;
     free(pau);
     return TRUE;
 }
 
 /* High-level functions * ================================================= */
 
-BOOL Au_HL_Sine(HAU handle, int secs)
+/** Callback to make a sine wave.  Currently only supports paFloat32
+ * format.
+ */
+static int PA_HL_Sine_Callback_(const void *input, void *output,
+    unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo,
+    PaStreamCallbackFlags statusFlags, void *handle )
 {
+    double freq_rad = *((double *)handle);
+    float *out = (float*)output;
+    unsigned int i;
+    double d;
+    PaTime t = timeInfo->outputBufferDacTime;   /* time for sample 0 */
+    double time_step = 1.0/44100.0; /* for now, assume 44.1kHz */
+
+    UNUSED(input);
+    UNUSED(statusFlags);
+
+    for( i=0; i<frameCount; i++ )
+    {
+        d = sin(freq_rad * t);
+        *out++ = d; /* left */
+        *out++ = d; /* right */
+        t += time_step;
+    }
+    return paContinue;
+} /* PA_HL_Sine_Callback_ */
+
+BOOL Au_HL_Sine(HAU handle, double freq_Hz, int secs)
+{
+    double freq_rad = 2.0 * M_PI * freq_Hz;
+    PaError pa_err;
+    void *old_userdata;
+    PaStreamCallback *old_pacallback;
+
     POW
-    if(!pau) return FALSE;
+    if(pau->format != AUSF_F32) return FALSE;
+
+    Pa_StopStream(pau->pa_stream);      /* just in case */
+
+    const PaStream *strinfo;
+    if(!(strinfo=Pa_GetStreamInfo(pau->pa_stream))) return FALSE;
+    /* TODO pass the stream params to the callback */
+
+    old_userdata = pau->pa_callback_userdata;
+    pau->pa_callback_userdata = (void *)&freq_rad;
+    old_pacallback = pau->pa_callback;
+    pau->pa_callback = PA_HL_Sine_Callback_;
+
+    pa_err = Pa_StartStream(pau->pa_stream);
+    if(pa_err != paNoError) return FALSE;
+
     Pa_Sleep(secs*1000);
+
+    Pa_StopStream(pau->pa_stream);
+
+    pau->pa_callback_userdata = old_userdata;
+    pau->pa_callback = old_pacallback;
+
     return TRUE;
 }
 

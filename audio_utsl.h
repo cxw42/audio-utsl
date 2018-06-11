@@ -55,7 +55,9 @@ extern BOOL Au_Startup();
 extern BOOL Au_Shutdown();
 
 /** Create a new output.
- * @param handle {HAU} The output to shut down
+ * @param format The output format
+ * @param sample_rate The sample rate, in Hz
+ * @param user_data Currently unused
  * @return non-NULL on success; NULL on failure
  */
 extern HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data);
@@ -72,9 +74,10 @@ extern BOOL Au_Delete(HAU handle);
 #ifdef AU_HIGH_LEVEL
 
 /** Play a sine wave for #secs seconds.
+ * Only supports the AUSF_F32 format at present.
  * @return FALSE if an error occurs; otherwise, TRUE.
  */
-extern BOOL Au_HL_Sine(HAU handle, int secs);
+extern BOOL Au_HL_Sine(HAU handle, double freq_Hz, int secs);
 #endif /* AU_HIGH_LEVEL */
 
 #define _AUDIO_UTSL_H_
