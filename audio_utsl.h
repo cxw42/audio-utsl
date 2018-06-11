@@ -11,9 +11,6 @@
 #include <pthread.h>
     /* Sorry - no portability yet.  PRs welcome! :) . */
 
-#include <libsndfile.h>
-#include <portaudio.h>
-
 /* A few niceties. ------------------------------------------------------- */
 #ifndef BOOL
 #define BOOL int
@@ -31,31 +28,56 @@
 #define NULL ((void *)(0))
 #endif
 
-/* Data structures ------------------------------------------------------- */
+/* Data structures, constants, and enums --------------------------------- */
 
-/** A running instance of audio-utsl ("AU").  AU is re-entrant, so you can
- * have multiple instances running at a time.  The limit is the number of
- * physical audio devices available on the system --- you can run as many
- * AU instances as you want if they are all outputting to files.
+/** A running instance of audio-utsl ("AU"), connected to a particular
+ * output.  AU is re-entrant, so you can have multiple instances running
+ * at a time.  The limit is the number of physical audio devices
+ * available on the system --- you can run as many AU instances as you
+ * want if they are all outputting to files.  There is a 1-1
+ * relationship between AU instances and outputs.
  */
-typedef struct AU_Instance {
-    void *placeholder;
-} AU_Instance, *HAU;
+typedef void *HAU;
 
-/* Prototypes ------------------------------------------------------------ */
+typedef enum AU_SampleFormat { AUSF_F32, AUSF_I32, AUSF_I24, AUSF_I16, AUSF_I8,
+    AUSF_UI8, AUSF_CUSTOM } AU_SampleFormat;
 
-/** Initialize an instance.
- * @return A new AU_Instance on success; NULL on failure
+/* Initialization and termination functions ------------------------------ */
+
+/** Initialize AU.  Must be called before any other functions.
+ * @return TRUE on success; FALSE on failure.
  */
-HAU Au_Init();
+extern BOOL Au_Startup();
 
-/** Shutdown an instance.
- * @param handle {HAU} The instance to shut down
+/** Shutdown AU.  Call this after closing any outputs you have open.
  * @return TRUE on success; FALSE on failure
  */
-BOOL Au_Shutdown(HAU handle);
+extern BOOL Au_Shutdown();
+
+/** Create a new output.
+ * @param handle {HAU} The output to shut down
+ * @return non-NULL on success; NULL on failure
+ */
+extern HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data);
+
+/** Close an output.  If this succeeds, any memory associated witht that
+ * output has been freed.
+ * @param handle {HAU} The output to shut down
+ * @return TRUE on success; FALSE on failure
+ */
+extern BOOL Au_Delete(HAU handle);
+
+/* High-level test functions --------------------------------------------- */
+
+#ifdef AU_HIGH_LEVEL
+
+/** Play a sine wave for #secs seconds.
+ * @return FALSE if an error occurs; otherwise, TRUE.
+ */
+extern BOOL Au_HL_Sine(HAU handle, int secs);
+#endif /* AU_HIGH_LEVEL */
 
 #define _AUDIO_UTSL_H_
 #endif /* _AUDIO_UTSL_H_ */
 
-/* vi: set ts=4 sts=4 sw=4 et ai: */
+/* vi: set ts=4 sts=4 sw=4 et ai tw=72: */
