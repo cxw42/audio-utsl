@@ -11,6 +11,7 @@
 #include <sndfile.h>
 #include <portaudio.h>
 
+#include <pthread.h>
 #include <string.h>
 
 #define _USE_MATH_DEFINES
@@ -21,18 +22,26 @@
 
 /* Private types ========================================================== */
 
+/** The non-opaque counterpart of a HAU. */
 typedef struct AU_Output *PAU;
 
+/** The void* provided to PortAudio callbacks. */
 typedef struct AU_Userdata {
     PAU pau;
     void *data;
 } AU_Userdata, *PAU_Userdata;
 
+/** The internal details of a single output (HAU). */
 typedef struct AU_Output {
+    /* --- General parameters --- */
+
     /** A copy of the AU sample format */
     AU_SampleFormat format;
 
-    /* PortAudio */
+    /** The sample rate */
+    double sample_rate;
+
+    /* --- PortAudio - output --- */
 
     /** The PortAudio stream */
     PaStream *pa_stream;
@@ -44,7 +53,29 @@ typedef struct AU_Output {
     /* Userdata for the pa_callback */
     void *pa_callback_userdata;
 
-    /* libsndfile TODO */
+    /* --- libsndfile - input --- */
+
+    /** The thread that reads from the input file */
+    pthread_t sf_reader_thread;
+
+    /** The semaphore that the reader thread blocks on.  Signaled when
+     * the reader pulls data from the ring buffer, or when the reader
+     * thread should exit. */
+    sem_t sf_reader_semaphore_sem_t;
+
+    /** How we refer to sf_reader_semaphore_sem_t.  Since it's a
+     * pointer, we can check it for NULLs. */
+    sem_t *sf_reader_semaphore;
+
+    /** If TRUE, the reader should exit when it wakes up. */
+    BOOL sf_reader_should_exit;
+
+    /** The file currently being read.  TODO refactor for playlist support. */
+    SNDFILE *sf_fd;
+
+    /** The ring buffer that is loaded by the reader thread. */
+    /*TODO*/
+
 } AU_Output;
 
 /** For convenience - map from the opaque HAU provided by the caller to
@@ -53,6 +84,12 @@ typedef struct AU_Output {
 #define POW_FAST \
     PAU pau = (PAU)handle;
 
+/** Common entry code for PortAudio callbacks (see PACallback_()). */
+#define POW_UD_FAST \
+    AU_Userdata *pud = (AU_Userdata *)handle; \
+    PAU pau = pud->pau;
+
+/** Common entry code for several Au_* functions. */
 #define POW \
     if(!AuInitialized_) return FALSE; \
     POW_FAST \
@@ -72,8 +109,9 @@ static int PACallback_(const void *input, void *output,
     PaStreamCallbackFlags statusFlags, void *handle )
 {
     POW_FAST
+    AU_Userdata ud = {pau, pau->pa_callback_userdata};
     return pau->pa_callback(input, output, frameCount, timeInfo,
-            statusFlags, pau->pa_callback_userdata);
+            statusFlags, (void *)&ud);
 }
 
 static int PAEmptyCallback_(const void *input, void *output,
@@ -83,6 +121,14 @@ static int PAEmptyCallback_(const void *input, void *output,
     return paComplete;      /* no audio */
 }
 
+/* libsndfile code ======================================================== */
+
+/** The worker thread that reads data from a file. */
+static void *SFFileReader_(void *handle)
+{
+    POW_FAST
+    return 0;
+} /* SFFileReader_ */
 
 /* Init/termination ======================================================= */
 
@@ -152,6 +198,9 @@ HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data)
         memset(pau, 0, sizeof(AU_Output));
 
         pau->format = format;
+        pau->sample_rate = sample_rate;
+
+        /* PortAudio init */
 
         pau->pa_callback = PAEmptyCallback_;
         pau->pa_callback_userdata = NULL;
@@ -178,10 +227,7 @@ HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data)
     } while(0);
 
     /* If we got here, rollback whatever was done. */
-    if(pau) {
-        if(pau->pa_stream) Pa_CloseStream(pau->pa_stream);
-        free(pau);
-    }
+    Au_Delete((HAU)pau);
 
     return NULL;
 } /* Au_New */
@@ -194,11 +240,93 @@ HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data)
 BOOL Au_Delete(HAU handle)
 {
     POW
+
+    if(pau->pa_stream) Pa_StopStream(pau->pa_stream);      /* just in case */
+
+    /* TODO shutdown the reader thread */
+
+    if(pau->sf_fd) {                    /* close the reader file */
+        sf_close(pau->sf_fd);
+        pau->sf_fd = NULL;
+    }
+
+    if(pau->pa_stream) {                /* close the output stream */
+        Pa_CloseStream(pau->pa_stream);
+        pau->pa_stream = NULL;
+    }
+
     free(pau);
     return TRUE;
 }
 
-/* High-level functions * ================================================= */
+/* Playback from a file =================================================== */
+
+/** Play audio file #filename on output #handle. */
+BOOL Au_Play(HAU handle, const char *filename)
+{
+    POW
+    if(!pau->pa_stream) return FALSE;
+
+    if(pau->sf_reader_thread) return FALSE;
+        /* For now --- TODO enqueue files */
+
+    Pa_StopStream(pau->pa_stream);      /* just in case */
+
+    do { /* once */
+
+        SF_INFO sf_info;
+        memset(&sf_info, 0, sizeof(sf_info));
+        pau->sf_fd = sf_open(filename, SFM_READ, &sf_info);
+        if(!pau->sf_fd) break;
+
+        if( (sf_info.samplerate != (int)pau->sample_rate) ||    /* sanity check */
+            (sf_info.channels != 2) ) {
+            break;
+        }
+
+        pau->sf_reader_semaphore = &pau->sf_reader_semaphore_sem_t;
+        if(sem_init(pau->sf_reader_semaphore, 0, 1) == -1) {
+            /* initial value 1, so the reader will start to load data */
+            break;
+        }
+        pau->sf_reader_should_exit = FALSE;
+
+        if(pthread_create(&pau->sf_reader_thread, NULL,
+                    SFFileReader_, pau) != 0) {
+            break;
+        }
+
+        return TRUE;
+    } while(0);
+
+    /* Failure: roll back changes */
+
+    if(pau->sf_reader_thread) {
+        /* Tell the thread to exit */
+        pau->sf_reader_should_exit = TRUE;
+        sem_post(pau->sf_reader_semaphore);
+
+        /* Wait for the thread to exit */
+        if(pthread_join(pau->sf_reader_thread, NULL) != 0) {
+            pthread_cancel(pau->sf_reader_thread);
+            /* TODO is there a better way? */
+        }
+    }
+
+    if(pau->sf_reader_semaphore) {
+        sem_destroy(pau->sf_reader_semaphore);
+        pau->sf_reader_semaphore = NULL;
+    }
+
+    if(pau->sf_fd) {
+        sf_close(pau->sf_fd);
+        pau->sf_fd = NULL;
+    }
+
+    return FALSE;
+} /* Au_Play */
+
+/* High-level functions =================================================== */
 
 /** Callback to make a sine wave.  Currently only supports paFloat32
  * format.
@@ -207,12 +335,14 @@ static int PA_HL_Sine_Callback_(const void *input, void *output,
     unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo,
     PaStreamCallbackFlags statusFlags, void *handle )
 {
-    double freq_rad = *((double *)handle);
+    POW_UD_FAST
+
+    double freq_rad = *((double *)pud->data);
     float *out = (float*)output;
     unsigned int i;
     double d;
     PaTime t = timeInfo->outputBufferDacTime;   /* time for sample 0 */
-    double time_step = 1.0/44100.0; /* for now, assume 44.1kHz */
+    double time_step = 1.0/pau->sample_rate;
 
     UNUSED(input);
     UNUSED(statusFlags);
