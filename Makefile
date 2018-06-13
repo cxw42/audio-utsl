@@ -1,5 +1,9 @@
-all: sine
+CFLAGS = -I. -Wall -g
+LDFLAGS = -lportaudio -lsndfile -lpthread
 
-sine: examples/sine.c audio_utsl.c audio_utsl.h
+all: sine check_file play_file
+
+%: examples/%.c audio_utsl.c pa_ringbuffer.c audio_utsl.h
 	echo =================================================================
-	gcc -o sine -I. -Wall examples/sine.c audio_utsl.c -lportaudio -lsndfile -lpthread
+	gcc $(CFLAGS) -o $@ $< audio_utsl.c pa_ringbuffer.c $(LDFLAGS)
+

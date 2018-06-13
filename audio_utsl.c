@@ -12,6 +12,7 @@
 #include <portaudio.h>
 
 #include <pthread.h>
+#include <semaphore.h>
 #include <string.h>
 
 #define _USE_MATH_DEFINES
@@ -20,30 +21,36 @@
 
 #include "pa_ringbuffer.h"
 
+/* Private definitions ==================================================== */
+
 #define UNUSED(x) ((void)(x))
+#define PA_BUFFER_FRAMECOUNT (256)
 
 /* Private types ========================================================== */
 
 /** The non-opaque counterpart of a HAU. */
-typedef struct AU_Output *PAU;
+typedef struct Au_Output *PAU;
 
 /** The void* provided to PortAudio callbacks. */
-typedef struct AU_Userdata {
+typedef struct Au_Userdata {
     PAU pau;
     void *data;
-} AU_Userdata, *PAU_Userdata;
+} Au_Userdata, *PAU_Userdata;
 
 /** The internal details of a single output (HAU). */
-typedef struct AU_Output {
-    /* --- General parameters --- */
+typedef struct Au_Output {
+    /* --- General parameters ------------------------- */
 
     /** A copy of the AU sample format */
-    AU_SampleFormat format;
+    Au_SampleFormat format;
 
     /** The sample rate */
-    double sample_rate;
+    int sample_rate;
 
-    /* --- PortAudio - output --- */
+    /** The number of channels */
+    int channels;
+
+    /* --- PortAudio - output ------------------------- */
 
     /** The PortAudio stream */
     PaStream *pa_stream;
@@ -55,7 +62,7 @@ typedef struct AU_Output {
     /* Userdata for the pa_callback */
     void *pa_callback_userdata;
 
-    /* --- libsndfile - input --- */
+    /* --- libsndfile - input ------------------------- */
 
     /** The thread that reads from the input file */
     pthread_t sf_reader_thread_storage;
@@ -89,17 +96,20 @@ typedef struct AU_Output {
     /** The memory area where the ring buffer lives */
     void *sf_buffer_data;
 
-} AU_Output;
+    // TODO in the ring buffer, hold commands.  Command can be followed
+    // by audio data, if it's an Output-Audio command.
+
+} Au_Output;
 
 /** For convenience - map from the opaque HAU provided by the caller to
- * the visible AU_Output * that we use.
+ * the visible Au_Output * that we use.
  */
 #define POW_FAST \
     PAU pau = (PAU)handle;
 
 /** Common entry code for PortAudio callbacks (see PACallback_()). */
 #define POW_UD_FAST \
-    AU_Userdata *pud = (AU_Userdata *)handle; \
+    Au_Userdata *pud = (Au_Userdata *)handle; \
     PAU pau = pud->pau;
 
 /** Common entry code for several Au_* functions. */
@@ -112,6 +122,31 @@ typedef struct AU_Output {
 /* Globals ================================================================ */
 BOOL AuInitialized_ = FALSE;
 
+/* Internal helpers ======================================================= */
+
+/** Get the size of a PortAudio buffer, in bytes.
+ * @return The size, or -1 on error. */
+int bufferSizeBytes_(PAU pau)
+{
+    if(!pau) return -1;
+    int format_size;
+
+    switch(pau->format) {
+        case AUSF_F32: format_size = 4; break;
+        case AUSF_I32: format_size = 4; break;
+        case AUSF_I24: format_size = 3; /*TODO aligned?*/ break;
+        case AUSF_I16: format_size = 2; break;
+        case AUSF_I8: format_size = 1; break;
+        case AUSF_UI8: format_size = 1; break;
+        case AUSF_CUSTOM: return -1;
+                            /* TODO figure this out */
+                          break;
+        default: return -1; break;
+    }
+
+    return PA_BUFFER_FRAMECOUNT * pau->channels * format_size;
+} /* bufferSizeBytes_ */
+
 /* PortAudio callbacks ==================================================== */
 
 /** Main callback for all PortAudio streams.
@@ -122,7 +157,7 @@ static int PACallback_(const void *input, void *output,
     PaStreamCallbackFlags statusFlags, void *handle )
 {
     POW_FAST
-    AU_Userdata ud = {pau, pau->pa_callback_userdata};
+    Au_Userdata ud = {pau, pau->pa_callback_userdata};
     return pau->pa_callback(input, output, frameCount, timeInfo,
             statusFlags, (void *)&ud);
 }
@@ -136,6 +171,7 @@ static int PAEmptyCallback_(const void *input, void *output,
 
 /* libsndfile code ======================================================== */
 
+#if 0
 /** The worker thread that reads data from a file. */
 static void *SFFileReader_(void *handle)
 {
@@ -150,10 +186,13 @@ static void *SFFileReader_(void *handle)
         /* Find out where to put the data */
 
         /* Read the data */
+        /* For now, every time the file_reader thread wakes up, fill the
+         * ring buffer. */
     }
 
     return 0;
 } /* SFFileReader_ */
+#endif
 
 /* Init/termination ======================================================= */
 
@@ -193,7 +232,8 @@ BOOL Au_Shutdown()
  * @param handle {HAU} The output to shut down
  * @return non-NULL on success; NULL on failure
  */
-HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data)
+HAU Au_New(Au_SampleFormat format, int sample_rate, int channels,
+        void *user_data)
 {
     PAU pau;
     PaError pa_err;
@@ -211,19 +251,22 @@ HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data)
         case AUSF_I16: pa_format = paInt16; break;
         case AUSF_I8: pa_format = paInt8; break;
         case AUSF_UI8: pa_format = paUInt8; break;
-        case AUSF_CUSTOM: pa_format = paCustomFormat; break;
+        case AUSF_CUSTOM: return NULL;  /* pa_format = paCustomFormat; */
+                            /* TODO figure this out */
+                          break;
         default: return NULL;
     }
 
     if(sample_rate < 1.0) return NULL;
 
     do {    /* init with rollback */
-        pau = (PAU)malloc(sizeof(AU_Output));
+        pau = (PAU)malloc(sizeof(Au_Output));
         if(!pau) break;
-        memset(pau, 0, sizeof(AU_Output));
+        memset(pau, 0, sizeof(Au_Output));
 
         pau->format = format;
         pau->sample_rate = sample_rate;
+        pau->channels = channels;
 
         /* PortAudio init */
 
@@ -233,16 +276,15 @@ HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data)
         pa_err = Pa_OpenDefaultStream(
             &pau->pa_stream,
             0,              /* no input channels */
-            2,              /* stereo output */
+            channels,
             pa_format,
             sample_rate,
-            256,            /* frames per buffer, i.e. the number
-                            of sample frames that PortAudio will
-                            request from the callback. Many apps
-                            may want to use
-                            paFramesPerBufferUnspecified, which
-                            tells PortAudio to pick the best,
-                            possibly changing, buffer size.*/
+            PA_BUFFER_FRAMECOUNT,
+                /* frames per buffer, i.e. the number of sample frames
+                 * that PortAudio will request from the callback. Many
+                 * apps may want to use paFramesPerBufferUnspecified,
+                 * which tells PortAudio to pick the best, possibly
+                 * changing, buffer size.*/
             PACallback_,    /* dispatches to pau->pa_callback */
             pau );      /*This is a pointer that will be passed to
                             your callback*/
@@ -286,6 +328,34 @@ BOOL Au_Delete(HAU handle)
 
 /* Playback from a file =================================================== */
 
+/** Get the sample rate and format from a file.
+ * @return TRUE on success; FALSE on failure. */
+BOOL Au_InspectFile(const char *filename, int *samplerate, int *channels,
+        Au_SampleFormat *format)
+{
+    SF_INFO sf_info;
+    SNDFILE *sf_fd;
+    memset(&sf_info, 0, sizeof(sf_info));
+    sf_fd = sf_open(filename, SFM_READ, &sf_info);
+    if(!sf_fd) return FALSE;
+
+    *samplerate = sf_info.samplerate;
+    *channels = sf_info.channels;
+    switch(sf_info.format & SF_FORMAT_SUBMASK) {
+        case SF_FORMAT_PCM_S8: *format = AUSF_I8; break;
+        case SF_FORMAT_PCM_U8: *format = AUSF_UI8; break;
+        case SF_FORMAT_PCM_16: *format = AUSF_I16; break;
+        case SF_FORMAT_PCM_24: *format = AUSF_I24; break;
+        case SF_FORMAT_PCM_32: *format = AUSF_I32; break;
+        case SF_FORMAT_FLOAT: *format = AUSF_F32; break;
+        default: *format = AUSF_CUSTOM; break;
+    }
+
+    sf_close(sf_fd);
+    return TRUE;
+} /* Au_InspectFile */
+
+#if 0
 /** Play audio file #filename on output #handle. */
 BOOL Au_Play(HAU handle, const char *filename)
 {
@@ -369,17 +439,23 @@ BOOL Au_Play(HAU handle, const char *filename)
 
     return FALSE;
 } /* Au_Play */
+#endif
 
 /* High-level functions =================================================== */
 
 /** Callback to make a sine wave.  Currently only supports paFloat32
  * format.
  */
+unsigned long Sine_Most_Recent_frameCount = 0;
+
 static int PA_HL_Sine_Callback_(const void *input, void *output,
     unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo,
     PaStreamCallbackFlags statusFlags, void *handle )
 {
     POW_UD_FAST
+
+    /* A debugging tool */
+    Sine_Most_Recent_frameCount = frameCount;
 
     double freq_rad = *((double *)pud->data);
     float *out = (float*)output;
@@ -410,12 +486,13 @@ BOOL Au_HL_Sine(HAU handle, double freq_Hz, int secs)
 
     POW
     if(pau->format != AUSF_F32) return FALSE;
+    if(pau->channels != 2) return FALSE;
 
     Pa_StopStream(pau->pa_stream);      /* just in case */
 
-    const PaStream *strinfo;
+    const PaStreamInfo *strinfo;
     if(!(strinfo=Pa_GetStreamInfo(pau->pa_stream))) return FALSE;
-    /* TODO pass the stream params to the callback */
+    /* TODO? pass the stream params to the callback */
 
     old_userdata = pau->pa_callback_userdata;
     pau->pa_callback_userdata = (void *)&freq_rad;

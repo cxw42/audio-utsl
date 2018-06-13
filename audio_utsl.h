@@ -39,8 +39,8 @@
  */
 typedef void *HAU;
 
-typedef enum AU_SampleFormat { AUSF_F32, AUSF_I32, AUSF_I24, AUSF_I16, AUSF_I8,
-    AUSF_UI8, AUSF_CUSTOM } AU_SampleFormat;
+typedef enum Au_SampleFormat { AUSF_F32, AUSF_I32, AUSF_I24, AUSF_I16, AUSF_I8,
+    AUSF_UI8, AUSF_CUSTOM } Au_SampleFormat;
 
 /* Initialization and termination functions ------------------------------ */
 
@@ -57,10 +57,12 @@ extern BOOL Au_Shutdown();
 /** Create a new output.
  * @param format The output format
  * @param sample_rate The sample rate, in Hz
+ * @param channels How many channels
  * @param user_data Currently unused
  * @return non-NULL on success; NULL on failure
  */
-extern HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data);
+extern HAU Au_New(Au_SampleFormat format, int sample_rate,
+        int channels, void *user_data);
 
 /** Close an output.  If this succeeds, any memory associated witht that
  * output has been freed.
@@ -69,12 +71,25 @@ extern HAU Au_New(AU_SampleFormat format, double sample_rate, void *user_data);
  */
 extern BOOL Au_Delete(HAU handle);
 
+/* File-reading and -playback functions ---------------------------------- */
+
+/** Get the sample rate and format from a file.
+ * @param filename The file
+ * @samplerate Will be filled in with the sample rate on success
+ * @channels Will be filled in with the channel count on success
+ * @format Will be filled in with the sample format on success.
+ *          If the format is unknown to audio-utsl, the return value
+ *          will be AUSF_CUSTOM.
+ * @return TRUE on success; FALSE on failure. */
+BOOL Au_InspectFile(const char *filename, int *samplerate, int *channels,
+        Au_SampleFormat *format);
+
 /* High-level test functions --------------------------------------------- */
 
 #ifdef AU_HIGH_LEVEL
 
-/** Play a sine wave for #secs seconds.
- * Only supports the AUSF_F32 format at present.
+/** Play a sine wave for #secs seconds at #freq_Hz.
+ * Only supports the AUSF_F32 format, 2 channels.
  * @return FALSE if an error occurs; otherwise, TRUE.
  */
 extern BOOL Au_HL_Sine(HAU handle, double freq_Hz, int secs);
