@@ -23,8 +23,43 @@
 
 /* Private definitions ==================================================== */
 
+/* Static assert - Copyright 2008 Padraig Brady (pixelbeat.org)
+ * http://www.pixelbeat.org/programming/gcc/static_assert.html
+ * Copying and distribution of this file, with or without modification,
+ * are permitted in any medium without royalty provided the copyright
+ * notice and this notice are preserved.
+*/
+#define ASSERT_CONCAT_(a, b) a##b
+#define ASSERT_CONCAT(a, b) ASSERT_CONCAT_(a, b)
+/* These can't be used after statements in c89. */
+#ifdef __COUNTER__
+  #define STATIC_ASSERT(e,m) \
+    ;enum { ASSERT_CONCAT(static_assert_, __COUNTER__) = 1/(int)(!!(e)) }
+#else
+  /* This can't be used twice on the same line so ensure if using in headers
+   * that the headers are not included twice (by wrapping in #ifndef...#endif)
+   * Note it doesn't cause an issue when used on same line of separate modules
+   * compiled with gcc -combine -fwhole-program.  */
+  #define STATIC_ASSERT(e,m) \
+    ;enum { ASSERT_CONCAT(assert_line_, __LINE__) = 1/(int)(!!(e)) }
+#endif
+
+/* Assumptions --- TODO remove these */
+STATIC_ASSERT( sizeof(int) == 4, "int must be 4 bytes");
+STATIC_ASSERT( sizeof(short) == 2, "short must be 2 bytes");
+STATIC_ASSERT( sizeof(float) == 4, "float must be 4 bytes");
+
+/* Helper macros ------------------------------------------------ */
 #define UNUSED(x) ((void)(x))
+
+/* Internal parameters ------------------------------------------ */
+/* TODO make these variables? */
+
+/** The number of frames in a PortAudio buffer */
 #define PA_BUFFER_FRAMECOUNT (256)
+
+/** The number of PortAudio buffers in a libsndfile ring buffer */
+#define PA_RING_BUFFERCOUNT (32)
 
 /* Private types ========================================================== */
 
@@ -171,11 +206,18 @@ static int PAEmptyCallback_(const void *input, void *output,
 
 /* libsndfile code ======================================================== */
 
-#if 0
 /** The worker thread that reads data from a file. */
 static void *SFFileReader_(void *handle)
 {
     POW
+    if(pau->format == AUSF_CUSTOM) {
+        return 0;    /* TODO */
+    }
+
+    void *data1, *data2;
+    ring_buffer_size_t buffers_avail, elems1, elems2, ok;
+    sf_count_t items_read;
+    sf_count_t items_wanted = pau->channels * PA_BUFFER_FRAMECOUNT;
 
     while(1) {
         sem_wait(pau->sf_reader_semaphore);
@@ -183,16 +225,74 @@ static void *SFFileReader_(void *handle)
             break;  /* EXIT POINT */
         }
 
-        /* Find out where to put the data */
-
-        /* Read the data */
-        /* For now, every time the file_reader thread wakes up, fill the
+        /* Find out where to put the data.
+         * For now, every time the file_reader thread wakes up, fill the
          * ring buffer. */
-    }
+        buffers_avail =
+            PaUtil_GetRingBufferWriteAvailable(pau->sf_buffer);
+
+        /* Read the data.  For now, do one element at a time so I don't
+         * have to deal with data1/data2. */
+        for( ; buffers_avail>0 ; --buffers_avail) {
+            ok = PaUtil_GetRingBufferWriteRegions( pau->sf_buffer, 1,
+                    &data1, &elems1, &data2, &elems2);
+            if(ok <= 0 || elems1 <= 0) {
+                break;
+            }
+
+            /* NOTE: we currently use the STATIC_ASSERT checks above
+             * to guarantee that, e.g., sf_read_float is giving us
+             * 32 bits at a time.  If those checks ever go away, this
+             * switch will need to change correspondingly. */
+
+            switch(pau->format) {   /* TODO optimize this */
+                case AUSF_F32:
+                    items_read = sf_read_float(pau->sf_fd, (float *)data1,
+                            pau->channels*PA_BUFFER_FRAMECOUNT);
+                    if(items_read != items_wanted) {
+                        return 0;   /* EXIT POINT */
+                    }
+                    PaUtil_AdvanceRingBufferWriteIndex(pau->sf_buffer, 1);
+                    break;
+
+                case AUSF_I32:
+                    items_read = sf_read_int(pau->sf_fd, (int *)data1,
+                            pau->channels*PA_BUFFER_FRAMECOUNT);
+                    if(items_read != items_wanted) {
+                        return 0;   /* EXIT POINT */
+                    }
+                    PaUtil_AdvanceRingBufferWriteIndex(pau->sf_buffer, 1);
+                    break;
+
+                case AUSF_I24:
+                    return 0;   /* EXIT POINT */ /* TODO handle this */
+                    break;
+
+                case AUSF_I16:
+                    items_read = sf_read_short(pau->sf_fd, (short *)data1,
+                            pau->channels*PA_BUFFER_FRAMECOUNT);
+                    if(items_read != items_wanted) {
+                        return 0;   /* EXIT POINT */
+                    }
+                    PaUtil_AdvanceRingBufferWriteIndex(pau->sf_buffer, 1);
+                    break;
+
+                case AUSF_I8:
+                    return 0;   /* EXIT POINT */ /* TODO handle this */
+                    break;
+                case AUSF_UI8:
+                    return 0;   /* EXIT POINT */ /* TODO handle this */
+                    break;
+                default:
+                    return 0;
+                    break;
+            } /* switch(format) */
+        } /* while buffers_avail */
+
+    } /* thread main loop */
 
     return 0;
 } /* SFFileReader_ */
-#endif
 
 /* Init/termination ======================================================= */
 
@@ -355,7 +455,37 @@ BOOL Au_InspectFile(const char *filename, int *samplerate, int *channels,
     return TRUE;
 } /* Au_InspectFile */
 
-#if 0
+static int PAPlayCallback_(const void *input, void *output,
+    unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo,
+    PaStreamCallbackFlags statusFlags, void *handle )
+{
+    void *data1, *data2;
+    ring_buffer_size_t read_avail, elems1, elems2, ok;
+    POW_UD_FAST
+
+    /* Let the reader get working on more data */
+    sem_post(pau->sf_reader_semaphore);
+
+    if(frameCount != PA_BUFFER_FRAMECOUNT) {
+        return paComplete; /* for now */
+    }
+
+    read_avail = PaUtil_GetRingBufferReadAvailable(pau->sf_buffer);
+    if(read_avail <= 0) {
+        return paComplete;  /* for now */
+    }
+    ok = PaUtil_GetRingBufferReadRegions(pau->sf_buffer, 1,
+                    &data1, &elems1, &data2, &elems2);
+    if(ok <= 0 || elems1 <= 0) {
+        return paComplete;
+    }
+
+    memcpy(output, data1, bufferSizeBytes_(pau));
+    PaUtil_AdvanceRingBufferReadIndex(pau->sf_buffer, 1);
+
+    return paContinue;
+}
+
 /** Play audio file #filename on output #handle. */
 BOOL Au_Play(HAU handle, const char *filename)
 {
@@ -380,10 +510,16 @@ BOOL Au_Play(HAU handle, const char *filename)
         }
 
         /* Ring buffer */
-        if((pau->sf_buffer_data = malloc(/*TODO*/)) == NULL) break;
+        int bufbytes = bufferSizeBytes_(pau);
+        if(bufbytes == -1) break;
+
+        if((pau->sf_buffer_data =
+                    malloc(bufbytes * PA_RING_BUFFERCOUNT)) == NULL) break;
         pau->sf_buffer = &pau->sf_buffer_storage;
         if(-1 == PaUtil_InitializeRingBuffer(pau->sf_buffer,
-                    /*TODO*/, /*TODO*/, pau->sf_buffer_data)) break;
+                    bufbytes, PA_RING_BUFFERCOUNT, pau->sf_buffer_data)) {
+            break;
+        }
 
         /* Threading */
         pau->sf_reader_semaphore = &pau->sf_reader_semaphore_storage;
@@ -394,15 +530,34 @@ BOOL Au_Play(HAU handle, const char *filename)
         pau->sf_reader_should_exit = FALSE;
 
         pau->sf_reader_thread = &pau->sf_reader_thread_storage;
-        if(pthread_create(&pau->sf_reader_thread, NULL,
+        if(pthread_create(pau->sf_reader_thread, NULL,
                     SFFileReader_, pau) != 0) {
             break;
         }
 
+        pau->pa_callback_userdata = NULL;   /* everything's in pau */
+        pau->pa_callback = PAPlayCallback_;
+
+        if(Pa_StartStream(pau->pa_stream) != paNoError) break;
         return TRUE;
     } while(0);
 
     /* Failure: roll back changes */
+    Au_Stop((HAU)pau);
+    return FALSE;
+} /* Au_Play */
+
+BOOL Au_Stop(HAU handle)
+{
+    POW
+
+    if(pau->pa_stream) Pa_StopStream(pau->pa_stream);      /* just in case */
+
+    /* TODO? protect the callback with a mutex?  If the stream is
+     * stopped, we shouldn't need to.
+     */
+    pau->pa_callback = PAEmptyCallback_;
+    pau->pa_callback_userdata = NULL;
 
     if(pau->sf_reader_thread) {
         /* Tell the thread to exit */
@@ -410,8 +565,8 @@ BOOL Au_Play(HAU handle, const char *filename)
         sem_post(pau->sf_reader_semaphore);
 
         /* Wait for the thread to exit */
-        if(pthread_join(pau->sf_reader_thread, NULL) != 0) {
-            pthread_cancel(pau->sf_reader_thread);
+        if(pthread_join(*pau->sf_reader_thread, NULL) != 0) {
+            pthread_cancel(*pau->sf_reader_thread);
             /* TODO is there a better way? */
         }
         pau->sf_reader_thread = NULL;
@@ -437,9 +592,14 @@ BOOL Au_Play(HAU handle, const char *filename)
         pau->sf_fd = NULL;
     }
 
-    return FALSE;
-} /* Au_Play */
-#endif
+    return TRUE;
+} /* Au_Stop */
+
+/* Utility functions ====================================================== */
+void Au_msleep(long ms)
+{
+    Pa_Sleep(ms);
+}
 
 /* High-level functions =================================================== */
 

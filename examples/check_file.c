@@ -11,6 +11,10 @@ int main(int argc, char **argv)
     int samplerate, channels;
     Au_SampleFormat format;
 
+    printf("Sizes: short %d int %d long %d float %d double %d\n",
+            (int)sizeof(short), (int)sizeof(int), (int)sizeof(long),
+            (int)sizeof(float), (int)sizeof(double));
+
     if(argc<2) return 1;
     if(!Au_Startup()) return 2;
 

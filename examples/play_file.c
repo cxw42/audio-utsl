@@ -31,8 +31,12 @@ int main(int argc, char **argv)
     /* create an output */
     if(!(hau=Au_New(format, samplerate, channels, NULL))) return 5;
 
-    if(!Au_Delete(hau)) return 6;
-    if(!Au_Shutdown()) return 7;
+    if(!Au_Play(hau, argv[1])) return 6;
+    Au_msleep(7*1000);
+    Au_Stop(hau);
+
+    if(!Au_Delete(hau)) return 7;
+    if(!Au_Shutdown()) return 8;
 
     return 0;
 }

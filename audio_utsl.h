@@ -84,6 +84,20 @@ extern BOOL Au_Delete(HAU handle);
 BOOL Au_InspectFile(const char *filename, int *samplerate, int *channels,
         Au_SampleFormat *format);
 
+/** Play audio file #filename on output #handle. */
+BOOL Au_Play(HAU handle, const char *filename);
+
+/** Stop a playback that was started with Au_Play.
+ * @return FALSE on invalid #hau; otherwise TRUE.
+ */
+BOOL Au_Stop(HAU hau);
+
+/* Utility functions ----------------------------------------------------- */
+
+/** Sleep for approximately #ms milliseconds.
+ * Actually just wraps Pa_Sleep().  */
+void Au_msleep(long ms);
+
 /* High-level test functions --------------------------------------------- */
 
 #ifdef AU_HIGH_LEVEL
