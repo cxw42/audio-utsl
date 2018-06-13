@@ -18,6 +18,8 @@
     /* Or you don't get M_PI from math.h on my system */
 #include <math.h>
 
+#include "pa_ringbuffer.h"
+
 #define UNUSED(x) ((void)(x))
 
 /* Private types ========================================================== */
@@ -56,25 +58,36 @@ typedef struct AU_Output {
     /* --- libsndfile - input --- */
 
     /** The thread that reads from the input file */
-    pthread_t sf_reader_thread;
+    pthread_t sf_reader_thread_storage;
+
+    /** How we access the reader thread.  NULL means
+     * sf_reader_thread_storage does not have a valid value. */
+    pthread_t *sf_reader_thread;
 
     /** The semaphore that the reader thread blocks on.  Signaled when
      * the reader pulls data from the ring buffer, or when the reader
      * thread should exit. */
-    sem_t sf_reader_semaphore_sem_t;
+    sem_t sf_reader_semaphore_storage;
 
-    /** How we refer to sf_reader_semaphore_sem_t.  Since it's a
+    /** How we refer to sf_reader_semaphore_storage.  Since it's a
      * pointer, we can check it for NULLs. */
     sem_t *sf_reader_semaphore;
 
-    /** If TRUE, the reader should exit when it wakes up. */
+    /** If TRUE, the reader should exit when it wakes up.  Set by the
+     * calling thread. */
     BOOL sf_reader_should_exit;
 
     /** The file currently being read.  TODO refactor for playlist support. */
     SNDFILE *sf_fd;
 
     /** The ring buffer that is loaded by the reader thread. */
-    /*TODO*/
+    PaUtilRingBuffer sf_buffer_storage;
+
+    /** How we access the ring buffer */
+    PaUtilRingBuffer *sf_buffer;
+
+    /** The memory area where the ring buffer lives */
+    void *sf_buffer_data;
 
 } AU_Output;
 
@@ -126,7 +139,19 @@ static int PAEmptyCallback_(const void *input, void *output,
 /** The worker thread that reads data from a file. */
 static void *SFFileReader_(void *handle)
 {
-    POW_FAST
+    POW
+
+    while(1) {
+        sem_wait(pau->sf_reader_semaphore);
+        if(pau->sf_reader_should_exit) {
+            break;  /* EXIT POINT */
+        }
+
+        /* Find out where to put the data */
+
+        /* Read the data */
+    }
+
     return 0;
 } /* SFFileReader_ */
 
@@ -284,13 +309,21 @@ BOOL Au_Play(HAU handle, const char *filename)
             break;
         }
 
-        pau->sf_reader_semaphore = &pau->sf_reader_semaphore_sem_t;
+        /* Ring buffer */
+        if((pau->sf_buffer_data = malloc(/*TODO*/)) == NULL) break;
+        pau->sf_buffer = &pau->sf_buffer_storage;
+        if(-1 == PaUtil_InitializeRingBuffer(pau->sf_buffer,
+                    /*TODO*/, /*TODO*/, pau->sf_buffer_data)) break;
+
+        /* Threading */
+        pau->sf_reader_semaphore = &pau->sf_reader_semaphore_storage;
         if(sem_init(pau->sf_reader_semaphore, 0, 1) == -1) {
             /* initial value 1, so the reader will start to load data */
             break;
         }
         pau->sf_reader_should_exit = FALSE;
 
+        pau->sf_reader_thread = &pau->sf_reader_thread_storage;
         if(pthread_create(&pau->sf_reader_thread, NULL,
                     SFFileReader_, pau) != 0) {
             break;
@@ -311,11 +344,22 @@ BOOL Au_Play(HAU handle, const char *filename)
             pthread_cancel(pau->sf_reader_thread);
             /* TODO is there a better way? */
         }
+        pau->sf_reader_thread = NULL;
     }
 
     if(pau->sf_reader_semaphore) {
         sem_destroy(pau->sf_reader_semaphore);
         pau->sf_reader_semaphore = NULL;
+    }
+
+    if(pau->sf_buffer) {
+        PaUtil_FlushRingBuffer(pau->sf_buffer);
+        pau->sf_buffer = NULL;
+    }
+
+    if(pau->sf_buffer_data) {
+        free(pau->sf_buffer_data);
+        pau->sf_buffer_data = NULL;
     }
 
     if(pau->sf_fd) {
