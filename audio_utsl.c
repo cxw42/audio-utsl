@@ -446,8 +446,11 @@ BOOL Au_InspectFile(const char *filename, int *samplerate, int *channels,
         case SF_FORMAT_PCM_U8: *format = AUSF_UI8; break;
         case SF_FORMAT_PCM_16: *format = AUSF_I16; break;
         case SF_FORMAT_PCM_24: *format = AUSF_I24; break;
+
         case SF_FORMAT_PCM_32: *format = AUSF_I32; break;
-        case SF_FORMAT_FLOAT: *format = AUSF_F32; break;
+        case SF_FORMAT_FLOAT:
+        case SF_FORMAT_VORBIS:  /* sf src/ogg_vorbis.c uses float inside */
+            *format = AUSF_F32; break;
         default: *format = AUSF_CUSTOM; break;
     }
 
