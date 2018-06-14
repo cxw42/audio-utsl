@@ -10,8 +10,13 @@ blobs.
 
 ## Installation
 
-Install libsndfile, portaudio, and pthreads.  E.g., on cygwin, those are
-packages you can install from setup.exe.
+ - Install libsndfile, portaudio, and pthreads.  E.g., on cygwin, those are
+   packages you can install from setup.exe.
+ - `make`.  This will build the three examples.
+
+To use audio-utsl in your own projects, just add everything in `src` to 
+some directory in your project and make sure that directory is listed as `-I`.
+See the example `CFLAGS` and `LDFLAGS` in [Makefile](Makefile).
 
 ## Internals
 

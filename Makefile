@@ -1,9 +1,9 @@
-CFLAGS = -I. -Wall -g
+CFLAGS = -Isrc -Wall -g
 LDFLAGS = -lportaudio -lsndfile -lpthread
 
 all: sine check_file play_file
 
-%: examples/%.c audio_utsl.c pa_ringbuffer.c audio_utsl.h
+%: examples/%.c src/audio_utsl.c src/pa_ringbuffer.c src/audio_utsl.h
 	echo =================================================================
-	gcc $(CFLAGS) -o $@ $< audio_utsl.c pa_ringbuffer.c $(LDFLAGS)
+	gcc $(CFLAGS) -o $@ $< src/audio_utsl.c src/pa_ringbuffer.c $(LDFLAGS)
 
