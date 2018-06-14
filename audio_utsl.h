@@ -87,6 +87,10 @@ BOOL Au_InspectFile(const char *filename, int *samplerate, int *channels,
 /** Play audio file #filename on output #handle. */
 BOOL Au_Play(HAU handle, const char *filename);
 
+/** Get the time since playback started, after an Au_Play() call.
+ * @return the time, or <0 in case of error. */
+double Au_GetTimeInPlayback(HAU handle);
+
 /** Stop a playback that was started with Au_Play.
  * @return FALSE on invalid #hau; otherwise TRUE.
  */

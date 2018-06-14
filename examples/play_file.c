@@ -11,6 +11,8 @@ int main(int argc, char **argv)
     HAU hau;
     int samplerate, channels;
     Au_SampleFormat format;
+    int idx;
+    double time;
 
     if(argc<2) return 1;
     if(!Au_Startup()) return 2;
@@ -32,7 +34,13 @@ int main(int argc, char **argv)
     if(!(hau=Au_New(format, samplerate, channels, NULL))) return 5;
 
     if(!Au_Play(hau, argv[1])) return 6;
-    Au_msleep(7*1000);
+
+    for(idx=0; idx<15; ++idx) {
+        time = Au_GetTimeInPlayback(hau);
+        printf("Time %f\n", time);
+        Au_msleep(500);
+    }
+
     Au_Stop(hau);
 
     if(!Au_Delete(hau)) return 7;

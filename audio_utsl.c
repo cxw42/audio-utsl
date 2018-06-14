@@ -122,6 +122,8 @@ typedef struct Au_Output {
     /** The file currently being read.  TODO refactor for playlist support. */
     SNDFILE *sf_fd;
 
+    /* --- Playback buffer ---------------------------- */
+
     /** The ring buffer that is loaded by the reader thread. */
     PaUtilRingBuffer sf_buffer_storage;
 
@@ -133,6 +135,18 @@ typedef struct Au_Output {
 
     // TODO in the ring buffer, hold commands.  Command can be followed
     // by audio data, if it's an Output-Audio command.
+
+    /** The current time in the stream, if nonnegative. */
+    PaTime playback_time;
+
+    /** The time the stream started, if nonnegative. */
+    PaTime playback_start_time;
+
+    /** The mutex protecting playback_time and playback_start_time. */
+    pthread_mutex_t playback_time_mutex_storage;
+
+    /** How we access playback_time_mutex_storage. */
+    pthread_mutex_t *playback_time_mutex;
 
 } Au_Output;
 
@@ -469,7 +483,31 @@ static int PAPlayCallback_(const void *input, void *output,
     /* Let the reader get working on more data */
     sem_post(pau->sf_reader_semaphore);
 
-    if(frameCount != PA_BUFFER_FRAMECOUNT) {
+    /* Initialize the sync information if necessary. */
+    if(pau->playback_start_time == -1.0) {
+        /* block if necessary for this one, so we have a reliable
+         * sync-start indication. */
+        if(0 != pthread_mutex_lock(pau->playback_time_mutex)) {
+            return paComplete;  /* for now */
+        }
+        pau->playback_time =
+            pau->playback_start_time = timeInfo->outputBufferDacTime;
+        pthread_mutex_unlock(pau->playback_time_mutex);
+    }
+
+    /* Update the sync information, if we can.  If we can't get the
+     * mutex, the caller is already reading it, so is going to miss
+     * this update anyway.  Therefore, don't bother updating it now.
+     *
+     * TODO is there a faster way than a mutex?
+     */
+    else if(0 == pthread_mutex_trylock(pau->playback_time_mutex)) {
+        pau->playback_time = timeInfo->outputBufferDacTime;
+                                                    /* time for sample 0 */
+        pthread_mutex_unlock(pau->playback_time_mutex);
+    }
+
+    if(frameCount != PA_BUFFER_FRAMECOUNT) {    /* shouldn't happen, right? */
         return paComplete; /* for now */
     }
 
@@ -502,6 +540,7 @@ BOOL Au_Play(HAU handle, const char *filename)
 
     do { /* once */
 
+        /* sf_fd */
         SF_INFO sf_info;
         memset(&sf_info, 0, sizeof(sf_info));
         pau->sf_fd = sf_open(filename, SFM_READ, &sf_info);
@@ -511,6 +550,14 @@ BOOL Au_Play(HAU handle, const char *filename)
             (sf_info.channels != 2) ) {
             break;
         }
+
+        /* Sync mutex */
+        pau->playback_time = -1.0;
+        pau->playback_start_time = -1.0;
+            /* negative => the player callback will initialize it. */
+
+        pau->playback_time_mutex = &pau->playback_time_mutex_storage;
+        if(0 != pthread_mutex_init(pau->playback_time_mutex, NULL)) break;
 
         /* Ring buffer */
         int bufbytes = bufferSizeBytes_(pau);
@@ -541,7 +588,13 @@ BOOL Au_Play(HAU handle, const char *filename)
         pau->pa_callback_userdata = NULL;   /* everything's in pau */
         pau->pa_callback = PAPlayCallback_;
 
+        /* Fire away! */
         if(Pa_StartStream(pau->pa_stream) != paNoError) break;
+        Pa_Sleep(0);
+            /* hopefully this will let the initial sync in PAPlayCallback_
+             * happen before the caller does anything.
+             * No guarantees, though! */
+
         return TRUE;
     } while(0);
 
@@ -549,6 +602,28 @@ BOOL Au_Play(HAU handle, const char *filename)
     Au_Stop((HAU)pau);
     return FALSE;
 } /* Au_Play */
+
+double Au_GetTimeInPlayback(HAU handle)
+{
+    PaTime start, curr;
+    POW_FAST
+    if(!pau) {
+        return -1.0;
+    }
+    if(!pau->playback_time_mutex) {
+        return -2.0;
+    }
+
+    if(0 == pthread_mutex_lock(pau->playback_time_mutex)) {
+        start = pau->playback_start_time;
+        curr = pau->playback_time;
+        pthread_mutex_unlock(pau->playback_time_mutex);
+    } else {
+        return -3.0;
+    }
+
+    return (double)(curr-start);
+} //Au_GetTimeInPlayback
 
 BOOL Au_Stop(HAU handle)
 {
@@ -589,6 +664,13 @@ BOOL Au_Stop(HAU handle)
         free(pau->sf_buffer_data);
         pau->sf_buffer_data = NULL;
     }
+
+    if(pau->playback_time_mutex) {
+        pthread_mutex_destroy(pau->playback_time_mutex);
+        pau->playback_time_mutex = NULL;
+    }
+    pau->playback_time = -1.0;
+    pau->playback_start_time = -1.0;
 
     if(pau->sf_fd) {
         sf_close(pau->sf_fd);
