@@ -80,9 +80,11 @@ extern BOOL Au_Delete(HAU handle);
  * @format Will be filled in with the sample format on success.
  *          If the format is unknown to audio-utsl, the return value
  *          will be AUSF_CUSTOM.
+ * @len If non-NULL and #filename is seekable, will be filled in with
+ *          the number of frames on success.
  * @return TRUE on success; FALSE on failure. */
 BOOL Au_InspectFile(const char *filename, int *samplerate, int *channels,
-        Au_SampleFormat *format);
+        Au_SampleFormat *format, long int *len);
 
 /** Play audio file #filename on output #handle. */
 BOOL Au_Play(HAU handle, const char *filename);

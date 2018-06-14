@@ -11,15 +11,19 @@ int main(int argc, char **argv)
     HAU hau;
     int samplerate, channels;
     Au_SampleFormat format;
+    long int len = -1;
+
     int idx;
+    int maxidx;
     double time;
 
     if(argc<2) return 1;
     if(!Au_Startup()) return 2;
 
-    if(!Au_InspectFile(argv[1], &samplerate, &channels, &format)) return 3;
-    printf("File %s: %d channels @ %d Hz, format ", argv[1],
-            channels, samplerate);
+    if(!Au_InspectFile(argv[1], &samplerate, &channels, &format,
+                            &len)) return 3;
+    printf("File %s: %d channels @ %d Hz, len %ld, format ", argv[1],
+            channels, samplerate, len);
     switch(format) {
         case AUSF_F32: printf("float32\n"); break;
         case AUSF_I32: printf("int32\n"); break;
@@ -35,7 +39,13 @@ int main(int argc, char **argv)
 
     if(!Au_Play(hau, argv[1])) return 6;
 
-    for(idx=0; idx<15; ++idx) {
+    if(len < 0.0) {     /* if we don't know how long it is, play for ~7 sec. */
+        maxidx = 15;
+    } else {
+        maxidx = 2*(len/samplerate+1);
+    }
+
+    for(idx=0; idx < maxidx; ++idx) {
         time = Au_GetTimeInPlayback(hau);
         printf("Time %f\n", time);
         Au_msleep(500);

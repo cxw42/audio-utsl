@@ -445,10 +445,12 @@ BOOL Au_Delete(HAU handle)
 /** Get the sample rate and format from a file.
  * @return TRUE on success; FALSE on failure. */
 BOOL Au_InspectFile(const char *filename, int *samplerate, int *channels,
-        Au_SampleFormat *format)
+        Au_SampleFormat *format, long int *len)
 {
     SF_INFO sf_info;
     SNDFILE *sf_fd;
+    sf_count_t framecount;
+
     memset(&sf_info, 0, sizeof(sf_info));
     sf_fd = sf_open(filename, SFM_READ, &sf_info);
     if(!sf_fd) return FALSE;
@@ -466,6 +468,11 @@ BOOL Au_InspectFile(const char *filename, int *samplerate, int *channels,
         case SF_FORMAT_VORBIS:  /* sf src/ogg_vorbis.c uses float inside */
             *format = AUSF_F32; break;
         default: *format = AUSF_CUSTOM; break;
+    }
+
+    if( (len != NULL) && sf_info.seekable ) {
+        framecount = sf_seek(sf_fd, 0, SEEK_END);
+        *len = (long int)framecount;
     }
 
     sf_close(sf_fd);

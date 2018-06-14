@@ -18,7 +18,8 @@ int main(int argc, char **argv)
     if(argc<2) return 1;
     if(!Au_Startup()) return 2;
 
-    if(!Au_InspectFile(argv[1], &samplerate, &channels, &format)) return 3;
+    if(!Au_InspectFile(argv[1], &samplerate, &channels, &format, NULL))
+        return 3;
     printf("File %s: %d channels @ %d Hz, format ", argv[1],
             channels, samplerate);
     switch(format) {
