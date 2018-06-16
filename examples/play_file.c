@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include "audio_utsl.h"
 
+extern unsigned int AU_PAPC_Count;
+extern unsigned int AU_SFFR_Count;
+
 int main(int argc, char **argv)
 {
     HAU hau;
@@ -47,7 +50,7 @@ int main(int argc, char **argv)
 
     for(idx=0; idx < maxidx; ++idx) {
         time = Au_GetTimeInPlayback(hau);
-        printf("Time %f\n", time);
+        printf("Time %f\tpapc %d\tsffr %d\n", time, AU_PAPC_Count, AU_SFFR_Count);
         Au_msleep(500);
     }
 

@@ -55,11 +55,27 @@ STATIC_ASSERT( sizeof(float) == 4, "float must be 4 bytes");
 /* Internal parameters ------------------------------------------ */
 /* TODO make these variables? */
 
+/** The maximum number of channels we support */
+#define PA_MAX_CHANNELS (2)
+
 /** The number of frames in a PortAudio buffer */
 #define PA_BUFFER_FRAMECOUNT (256)
 
-/** The number of PortAudio buffers in a libsndfile ring buffer */
+/** The number of PortAudio buffers in a libsndfile ring buffer.
+ * Must be a power of 2 (PortAudio requirement). */
 #define PA_RING_BUFFERCOUNT (32)
+
+/** PAPlayCallback_() State.  Sent by the SF reader to the playback
+ * thread. */
+typedef enum PPPS {
+    /** Output audio data */
+    PPPS_Playing,
+    /** Stop the stream */
+    PPPS_Stopped
+} PPPS;
+
+/** Counts of frames. */
+typedef long int Au_FrameCount;
 
 /* Private types ========================================================== */
 
@@ -71,6 +87,18 @@ typedef struct Au_Userdata {
     PAU pau;
     void *data;
 } Au_Userdata, *PAU_Userdata;
+
+/** A buffer from the file reader to the PA callback.
+ * The data member is large enough to hold the largest buffer.
+ * required */
+typedef struct FRBuf {
+    /** What the playback routine should do. */
+    PPPS state;
+    /** What position we're at in the file. */
+    Au_FrameCount pos_frames;
+    /** The audio data */
+    unsigned char data[PA_BUFFER_FRAMECOUNT * PA_MAX_CHANNELS * sizeof(float)];
+} FRBuf, *PFRBuf;
 
 /** The internal details of a single output (HAU). */
 typedef struct Au_Output {
@@ -130,7 +158,7 @@ typedef struct Au_Output {
     /** How we access the ring buffer */
     PaUtilRingBuffer *sf_buffer;
 
-    /** The memory area where the ring buffer lives */
+    /** The memory area where the ring buffer lives.  Holds FRBufs. */
     void *sf_buffer_data;
 
     // TODO in the ring buffer, hold commands.  Command can be followed
@@ -142,11 +170,15 @@ typedef struct Au_Output {
     /** The time the stream started, if nonnegative. */
     PaTime playback_start_time;
 
-    /** The mutex protecting playback_time and playback_start_time. */
+    /** The mutex protecting playback_time and playback_start_time */
     pthread_mutex_t playback_time_mutex_storage;
 
     /** How we access playback_time_mutex_storage. */
     pthread_mutex_t *playback_time_mutex;
+
+    /** The current frame count in the stream.  Not mutex-protected
+     * because it is only accessed by the SFFileReader_() thread. */
+    Au_FrameCount playback_frames;
 
 } Au_Output;
 
@@ -220,22 +252,29 @@ static int PAEmptyCallback_(const void *input, void *output,
 
 /* libsndfile code ======================================================== */
 
+unsigned int AU_SFFR_Count = 0;    /* for debugging */
 /** The worker thread that reads data from a file. */
 static void *SFFileReader_(void *handle)
 {
     POW
     if(pau->format == AUSF_CUSTOM) {
+        AU_SFFR_Count = 123000;
         return 0;    /* TODO */
     }
 
+    //AU_SFFR_Count+=2;
+
     void *data1, *data2;
     ring_buffer_size_t buffers_avail, elems1, elems2, ok;
-    sf_count_t items_read;
-    sf_count_t items_wanted = pau->channels * PA_BUFFER_FRAMECOUNT;
+    sf_count_t frames_read;
+    sf_count_t frames_wanted = PA_BUFFER_FRAMECOUNT;
+    PFRBuf pfr;
 
     while(1) {
         sem_wait(pau->sf_reader_semaphore);
+        //AU_SFFR_Count+=2;
         if(pau->sf_reader_should_exit) {
+            AU_SFFR_Count = 123456789;
             break;  /* EXIT POINT */
         }
 
@@ -248,11 +287,19 @@ static void *SFFileReader_(void *handle)
         /* Read the data.  For now, do one element at a time so I don't
          * have to deal with data1/data2. */
         for( ; buffers_avail>0 ; --buffers_avail) {
+            ++AU_SFFR_Count;
             ok = PaUtil_GetRingBufferWriteRegions( pau->sf_buffer, 1,
                     &data1, &elems1, &data2, &elems2);
             if(ok <= 0 || elems1 <= 0) {
+                AU_SFFR_Count = 123001;
                 break;
             }
+
+            pfr = (PFRBuf)data1;
+            //pfr->pos_frames = sf_seek(pau->sf_fd, SEEK_CUR, 0);
+                /* Get the offset of the beginning of what we are
+                 * reading */
+                // TODO cache this?
 
             /* NOTE: we currently use the STATIC_ASSERT checks above
              * to guarantee that, e.g., sf_read_float is giving us
@@ -261,50 +308,74 @@ static void *SFFileReader_(void *handle)
 
             switch(pau->format) {   /* TODO optimize this */
                 case AUSF_F32:
-                    items_read = sf_read_float(pau->sf_fd, (float *)data1,
-                            pau->channels*PA_BUFFER_FRAMECOUNT);
-                    if(items_read != items_wanted) {
+                    frames_read = sf_readf_float(pau->sf_fd, (float *)pfr->data,
+                            PA_BUFFER_FRAMECOUNT);
+                    if(frames_read > 0 && frames_read != frames_wanted) {
+                        AU_SFFR_Count = 123002;
                         return 0;   /* EXIT POINT */
                     }
-                    PaUtil_AdvanceRingBufferWriteIndex(pau->sf_buffer, 1);
                     break;
 
                 case AUSF_I32:
-                    items_read = sf_read_int(pau->sf_fd, (int *)data1,
-                            pau->channels*PA_BUFFER_FRAMECOUNT);
-                    if(items_read != items_wanted) {
+                    frames_read = sf_readf_int(pau->sf_fd, (int *)pfr->data,
+                            PA_BUFFER_FRAMECOUNT);
+                    if(frames_read > 0 && frames_read != frames_wanted) {
+                        AU_SFFR_Count = 123003;
                         return 0;   /* EXIT POINT */
+                        // TODO fill out the rest of the buffer with
+                        // zeros instead
                     }
-                    PaUtil_AdvanceRingBufferWriteIndex(pau->sf_buffer, 1);
                     break;
 
                 case AUSF_I24:
+                    AU_SFFR_Count = 123004;
                     return 0;   /* EXIT POINT */ /* TODO handle this */
                     break;
 
                 case AUSF_I16:
-                    items_read = sf_read_short(pau->sf_fd, (short *)data1,
-                            pau->channels*PA_BUFFER_FRAMECOUNT);
-                    if(items_read != items_wanted) {
+                    frames_read = sf_readf_short(pau->sf_fd, (short *)pfr->data,
+                            PA_BUFFER_FRAMECOUNT);
+                    if(frames_read > 0 && frames_read != frames_wanted) {
+                        AU_SFFR_Count = 123005;
                         return 0;   /* EXIT POINT */
                     }
-                    PaUtil_AdvanceRingBufferWriteIndex(pau->sf_buffer, 1);
                     break;
 
                 case AUSF_I8:
+                    AU_SFFR_Count = 123006;
                     return 0;   /* EXIT POINT */ /* TODO handle this */
                     break;
                 case AUSF_UI8:
+                    AU_SFFR_Count = 123007;
                     return 0;   /* EXIT POINT */ /* TODO handle this */
                     break;
                 default:
+                    AU_SFFR_Count = 123008;
                     return 0;
                     break;
             } /* switch(format) */
+
+            /* Sync info */
+            pfr->pos_frames = pau->playback_frames;
+            pau->playback_frames += frames_read;
+
+            if(frames_read == 0) {       /* Report EOF */
+                pfr->state = PPPS_Stopped;
+                AU_SFFR_Count |= 0x01;
+            } else {                    /* Play it */
+                pfr->state = PPPS_Playing;
+                AU_SFFR_Count &= (unsigned long int)(-2);
+            }
+
+            /* Send pfr to the PortAudio callback */
+            pfr = NULL;
+            PaUtil_AdvanceRingBufferWriteIndex(pau->sf_buffer, 1);
         } /* while buffers_avail */
 
+        //AU_SFFR_Count+=2;
     } /* thread main loop */
 
+    AU_SFFR_Count = 987654321;
     return 0;
 } /* SFFileReader_ */
 
@@ -479,6 +550,9 @@ BOOL Au_InspectFile(const char *filename, int *samplerate, int *channels,
     return TRUE;
 } /* Au_InspectFile */
 
+unsigned int AU_PAPC_Count = 0;     /* For debugging */
+
+/** PortAudio callback to play data received from a file. */
 static int PAPlayCallback_(const void *input, void *output,
     unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo,
     PaStreamCallbackFlags statusFlags, void *handle )
@@ -487,37 +561,16 @@ static int PAPlayCallback_(const void *input, void *output,
     ring_buffer_size_t read_avail, elems1, elems2, ok;
     POW_UD_FAST
 
+    ++AU_PAPC_Count;
+
     /* Let the reader get working on more data */
     sem_post(pau->sf_reader_semaphore);
-
-    /* Initialize the sync information if necessary. */
-    if(pau->playback_start_time == -1.0) {
-        /* block if necessary for this one, so we have a reliable
-         * sync-start indication. */
-        if(0 != pthread_mutex_lock(pau->playback_time_mutex)) {
-            return paComplete;  /* for now */
-        }
-        pau->playback_time =
-            pau->playback_start_time = timeInfo->outputBufferDacTime;
-        pthread_mutex_unlock(pau->playback_time_mutex);
-    }
-
-    /* Update the sync information, if we can.  If we can't get the
-     * mutex, the caller is already reading it, so is going to miss
-     * this update anyway.  Therefore, don't bother updating it now.
-     *
-     * TODO is there a faster way than a mutex?
-     */
-    else if(0 == pthread_mutex_trylock(pau->playback_time_mutex)) {
-        pau->playback_time = timeInfo->outputBufferDacTime;
-                                                    /* time for sample 0 */
-        pthread_mutex_unlock(pau->playback_time_mutex);
-    }
 
     if(frameCount != PA_BUFFER_FRAMECOUNT) {    /* shouldn't happen, right? */
         return paComplete; /* for now */
     }
 
+    /* Get the next block of info, if any */
     read_avail = PaUtil_GetRingBufferReadAvailable(pau->sf_buffer);
     if(read_avail <= 0) {
         return paComplete;  /* for now */
@@ -528,11 +581,40 @@ static int PAPlayCallback_(const void *input, void *output,
         return paComplete;
     }
 
-    memcpy(output, data1, bufferSizeBytes_(pau));
+    PFRBuf pfr = (PFRBuf)data1;
+    PPPS state = pfr->state;
+
+    /* Initialize the sync information if necessary. */
+    if(pau->playback_start_time == -1.0) {
+        /* block if necessary for this one, so we have a reliable
+         * sync-start indication. */
+        if(0 != pthread_mutex_lock(pau->playback_time_mutex)) {
+            return paComplete;  /* for now */
+        }
+        pau->playback_start_time = pau->playback_time = 0;
+        pthread_mutex_unlock(pau->playback_time_mutex);
+    }
+
+    /* Update the sync information, if we can.  If we can't get the
+     * mutex, the caller is already reading it, so is going to miss
+     * this update anyway.  Therefore, don't bother updating it now.
+     *
+     * TODO is there a faster way than a mutex?
+     */
+    else if(0 == pthread_mutex_trylock(pau->playback_time_mutex)) {
+        pau->playback_time = (PaTime)pfr->pos_frames/pau->sample_rate;
+        pthread_mutex_unlock(pau->playback_time_mutex);
+    }
+
+    /* Output the data */
+    memcpy(output, (void *)pfr->data, bufferSizeBytes_(pau));
+
+    /* Release the info block */
+    pfr = NULL;     /* because it's invalid once we advance the read index */
     PaUtil_AdvanceRingBufferReadIndex(pau->sf_buffer, 1);
 
-    return paContinue;
-}
+    return (state == PPPS_Stopped) ? paComplete : paContinue;
+} /* PAPlayCallback_ */
 
 /** Play audio file #filename on output #handle. */
 BOOL Au_Play(HAU handle, const char *filename)
@@ -558,7 +640,8 @@ BOOL Au_Play(HAU handle, const char *filename)
             break;
         }
 
-        /* Sync mutex */
+        /* Sync */
+        pau->playback_frames = 0;
         pau->playback_time = -1.0;
         pau->playback_start_time = -1.0;
             /* negative => the player callback will initialize it. */
@@ -567,14 +650,14 @@ BOOL Au_Play(HAU handle, const char *filename)
         if(0 != pthread_mutex_init(pau->playback_time_mutex, NULL)) break;
 
         /* Ring buffer */
-        int bufbytes = bufferSizeBytes_(pau);
-        if(bufbytes == -1) break;
+        //int bufbytes = bufferSizeBytes_(pau);
+        //if(bufbytes == -1) break;
 
         if((pau->sf_buffer_data =
-                    malloc(bufbytes * PA_RING_BUFFERCOUNT)) == NULL) break;
+                    malloc(sizeof(FRBuf) * PA_RING_BUFFERCOUNT)) == NULL) break;
         pau->sf_buffer = &pau->sf_buffer_storage;
         if(-1 == PaUtil_InitializeRingBuffer(pau->sf_buffer,
-                    bufbytes, PA_RING_BUFFERCOUNT, pau->sf_buffer_data)) {
+                    sizeof(FRBuf), PA_RING_BUFFERCOUNT, pau->sf_buffer_data)) {
             break;
         }
 
