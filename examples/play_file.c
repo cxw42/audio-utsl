@@ -14,6 +14,7 @@
  */
 
 #include <stdio.h>
+#include <limits.h>
 #include "audio_utsl.h"
 
 extern unsigned int AU_PAPC_Count;
@@ -58,9 +59,16 @@ int main(int argc, char **argv)
         maxidx = 2*(len/samplerate+1);
     }
 
+    /* If given a second parameter, play until the file is done. */
+    if(argc>2) maxidx = INT_MAX;
+
     for(idx=0; idx < maxidx; ++idx) {
         time = Au_GetTimeInPlayback(hau);
         printf("Time %f\tpapc %d\tsffr %d\n", time, AU_PAPC_Count, AU_SFFR_Count);
+        if(time>0 && !Au_IsPlaying(hau)) break;
+            /* Check time>0 because IsPlaying is not necessarily true
+             * just after an Au_Play() call, at which point time=0.*/
+
         Au_msleep(500);
     }
 

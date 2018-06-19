@@ -99,6 +99,12 @@ BOOL Au_InspectFile(const char *filename, int *samplerate, int *channels,
 /** Play audio file #filename on output #handle. */
 BOOL Au_Play(HAU handle, const char *filename);
 
+/** Returns true if #handle is probably playing a file, false if
+ * probably not.  Not guaranteed, since audio_utsl does not yet have
+ * the world's most thorough error handling.
+ * Also, may not be true immediately after an Au_Play() call. */
+BOOL Au_IsPlaying(HAU handle);
+
 /** Get the time since playback started, after an Au_Play() call.
  * @return the time, or <0 in case of error. */
 double Au_GetTimeInPlayback(HAU handle);

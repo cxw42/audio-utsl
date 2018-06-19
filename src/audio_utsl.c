@@ -162,17 +162,15 @@ typedef struct Au_Output {
 
     /* --- Playback buffer ---------------------------- */
 
-    /** The ring buffer that is loaded by the reader thread. */
+    /** The ring buffer that is loaded by the reader thread.  Holds
+     * FRBuf structures. */
     PaUtilRingBuffer sf_buffer_storage;
 
     /** How we access the ring buffer */
     PaUtilRingBuffer *sf_buffer;
 
-    /** The memory area where the ring buffer lives.  Holds FRBufs. */
+    /** The memory area where the ring buffer lives. */
     void *sf_buffer_data;
-
-    // TODO in the ring buffer, hold commands.  Command can be followed
-    // by audio data, if it's an Output-Audio command.
 
     /** The current time in the stream, if nonnegative. */
     PaTime playback_time;
@@ -180,7 +178,11 @@ typedef struct Au_Output {
     /** The time the stream started, if nonnegative. */
     PaTime playback_start_time;
 
-    /** The mutex protecting playback_time and playback_start_time */
+    /** Whether or not a file is playing */
+    BOOL is_playing;
+
+    /** The mutex protecting playback_time, playback_start_time,
+     * and is_playing. */
     pthread_mutex_t playback_time_mutex_storage;
 
     /** How we access playback_time_mutex_storage. */
@@ -567,6 +569,12 @@ static int PAPlayCallback_(const void *input, void *output,
     unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo,
     PaStreamCallbackFlags statusFlags, void *handle )
 {
+#define MARK_NOT_PLAYING \
+    do { if(0 == pthread_mutex_lock(pau->playback_time_mutex)) { \
+        pau->is_playing = FALSE; \
+        pthread_mutex_unlock(pau->playback_time_mutex); \
+    } } while(0)
+
     void *data1, *data2;
     ring_buffer_size_t read_avail, elems1, elems2, ok;
     POW_UD_FAST
@@ -577,17 +585,20 @@ static int PAPlayCallback_(const void *input, void *output,
     sem_post(pau->sf_reader_semaphore);
 
     if(frameCount != PA_BUFFER_FRAMECOUNT) {    /* shouldn't happen, right? */
+        MARK_NOT_PLAYING;
         return paComplete; /* for now */
     }
 
     /* Get the next block of info, if any */
     read_avail = PaUtil_GetRingBufferReadAvailable(pau->sf_buffer);
     if(read_avail <= 0) {
+        MARK_NOT_PLAYING;
         return paComplete;  /* for now */
     }
     ok = PaUtil_GetRingBufferReadRegions(pau->sf_buffer, 1,
                     &data1, &elems1, &data2, &elems2);
     if(ok <= 0 || elems1 <= 0) {
+        MARK_NOT_PLAYING;
         return paComplete;
     }
 
@@ -599,9 +610,11 @@ static int PAPlayCallback_(const void *input, void *output,
         /* block if necessary for this one, so we have a reliable
          * sync-start indication. */
         if(0 != pthread_mutex_lock(pau->playback_time_mutex)) {
+            // Couldn't lock the mutex, so can't change pau->is_playing
             return paComplete;  /* for now */
         }
         pau->playback_start_time = pau->playback_time = 0;
+        pau->is_playing = TRUE;
         pthread_mutex_unlock(pau->playback_time_mutex);
     }
 
@@ -613,6 +626,7 @@ static int PAPlayCallback_(const void *input, void *output,
      */
     else if(0 == pthread_mutex_trylock(pau->playback_time_mutex)) {
         pau->playback_time = (PaTime)pfr->pos_frames/pau->sample_rate;
+        pau->is_playing = TRUE;
         pthread_mutex_unlock(pau->playback_time_mutex);
     }
 
@@ -623,7 +637,13 @@ static int PAPlayCallback_(const void *input, void *output,
     pfr = NULL;     /* because it's invalid once we advance the read index */
     PaUtil_AdvanceRingBufferReadIndex(pau->sf_buffer, 1);
 
-    return (state == PPPS_Stopped) ? paComplete : paContinue;
+    if(state == PPPS_Stopped) {
+        MARK_NOT_PLAYING;
+        return paComplete;
+    } else {
+        return paContinue;
+    }
+#undef MARK_NOT_PLAYING
 } /* PAPlayCallback_ */
 
 /** Play audio file #filename on output #handle. */
@@ -651,6 +671,7 @@ BOOL Au_Play(HAU handle, const char *filename)
         }
 
         /* Sync */
+        pau->is_playing = FALSE;
         pau->playback_frames = 0;
         pau->playback_time = -1.0;
         pau->playback_start_time = -1.0;
@@ -690,6 +711,7 @@ BOOL Au_Play(HAU handle, const char *filename)
 
         /* Fire away! */
         if(Pa_StartStream(pau->pa_stream) != paNoError) break;
+        sched_yield();
         Pa_Sleep(0);
             /* hopefully this will let the initial sync in PAPlayCallback_
              * happen before the caller does anything.
@@ -702,6 +724,17 @@ BOOL Au_Play(HAU handle, const char *filename)
     Au_Stop((HAU)pau);
     return FALSE;
 } /* Au_Play */
+
+BOOL Au_IsPlaying(HAU handle)
+{
+    POW
+    BOOL retval = FALSE;
+    if(0 == pthread_mutex_lock(pau->playback_time_mutex)) {
+        retval = pau->is_playing;
+        pthread_mutex_unlock(pau->playback_time_mutex);
+    }
+    return retval;
+} /* Au_IsPlaying */
 
 double Au_GetTimeInPlayback(HAU handle)
 {
@@ -723,7 +756,7 @@ double Au_GetTimeInPlayback(HAU handle)
     }
 
     return (double)(curr-start);
-} //Au_GetTimeInPlayback
+} /* Au_GetTimeInPlayback */
 
 BOOL Au_Stop(HAU handle)
 {
@@ -771,6 +804,7 @@ BOOL Au_Stop(HAU handle)
     }
     pau->playback_time = -1.0;
     pau->playback_start_time = -1.0;
+    pau->is_playing = FALSE;
 
     if(pau->sf_fd) {
         sf_close(pau->sf_fd);
